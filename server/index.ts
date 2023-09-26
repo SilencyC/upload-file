@@ -4,18 +4,19 @@ import fse = require('fs-extra');
 // 使用 multiparty 处理前端传来的 formData
 // 在 multiparty.parse 的回调中，files 参数保存了 formData 中文件，fields 参数保存了 formData 中非文件的字段
 import multiparty = require('multiparty');
+import {
+  UPLOAD_DIR,
+  createUploadedList,
+  extractExt,
+  getChunkDir,
+} from './utils';
 
 const server = http.createServer();
-
-// 大文件存储目录
-const UPLOAD_DIR = path.resolve(__dirname, 'target');
 
 function resolvePost<T>(req: http.IncomingMessage): Promise<T> {
   return new Promise((resolve) => {
     let chunk = '';
     req.on('data', (data) => {
-      console.log(data);
-
       chunk += data;
     });
     req.on('end', () => {
@@ -29,7 +30,7 @@ const pipeStream = (path, writeStream) => {
   return new Promise((resolve) => {
     const readStream = fse.createReadStream(path);
     readStream.on('end', () => {
-      fse.unlinkSync(path);
+      // fse.unlinkSync(path);
       resolve('');
     });
 
@@ -38,9 +39,10 @@ const pipeStream = (path, writeStream) => {
 };
 
 // 合并切片
-const mergeFileChunk = async (filePath, filename, size) => {
-  const chunkDir = path.resolve(UPLOAD_DIR, 'chunkDir' + filename);
+const mergeFileChunk = async (filePath, fileHash, size) => {
+  const chunkDir = getChunkDir(fileHash);
   const chunkPaths = await fse.readdir(chunkDir);
+  console.log(chunkDir, chunkPaths);
 
   // 根据切片下标进行排序
   // 否则直接读取目录的获得的顺序会错乱
@@ -69,14 +71,16 @@ server.on('request', async (req, res) => {
     return;
   }
 
-  console.log(req);
-  
-
   if (req.url === '/merge') {
-    const data = await resolvePost<{ filename: string; size: number }>(req);
-    const { filename, size } = data;
-    const filePath = path.resolve(UPLOAD_DIR, `${filename}`);
-    await mergeFileChunk(filePath, filename, size);
+    const data = await resolvePost<{
+      fileHash: string;
+      filename: string;
+      size: number;
+    }>(req);
+    const { fileHash, filename, size } = data;
+    const ext = extractExt(filename);
+    const filePath = path.resolve(UPLOAD_DIR, `${fileHash}.${ext}`);
+    await mergeFileChunk(filePath, fileHash, size);
     res.end(
       JSON.stringify({
         code: 0,
@@ -87,19 +91,46 @@ server.on('request', async (req, res) => {
     return;
   }
 
+  if (req.url === '/verify') {
+    const { filename, fileHash } = await resolvePost<{
+      filename: string;
+      fileHash: string;
+    }>(req);
+
+    const ext = extractExt(filename);
+    const filePath = path.resolve(UPLOAD_DIR, `${fileHash}.${ext}`);
+
+    if (fse.existsSync(filePath)) {
+      res.end(
+        JSON.stringify({
+          shouldUpload: false,
+        })
+      );
+    } else {
+      const uploadedList = await createUploadedList(fileHash);
+
+      res.end(
+        JSON.stringify({
+          shouldUpload: true,
+          uploadedList,
+        })
+      );
+    }
+    return;
+  }
+
   const multipart = new multiparty.Form();
 
   multipart.parse(req, async (err, fields, files) => {
     if (err) return;
 
-    console.log(err, fields, files);
-
     const [chunk] = files.chunk;
     const [hash] = fields.hash;
+    const [fileHash] = fields.fileHash;
     const [filename] = fields.filename;
     // 创建临时文件夹用于临时存储chunk
     // 添加chunkDir 前缀与文件名作区分
-    const chunkDir = path.resolve(UPLOAD_DIR, 'chunkDir' + filename);
+    const chunkDir = getChunkDir(fileHash);
 
     if (!fse.existsSync(chunkDir)) {
       await fse.mkdirs(chunkDir);
