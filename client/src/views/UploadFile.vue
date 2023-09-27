@@ -117,18 +117,21 @@ async function uploadChunks(data: TData, uploadedList: string[] = []) {
       formData.append('filename', container.file?.name || '');
 
       return { formData, index };
-    })
-    .map(({ formData, index }) =>
-      request({
-        url: 'http://localhost:3000/request',
-        data: formData,
-        onprogress: createProgressHandler(data[index]),
-        requestList: requestXhrList,
-      }),
-    );
+    });
+  //   .map(({ formData, index }) =>
+  //     request({
+  //       url: 'http://localhost:3000/request',
+  //       data: formData,
+  //       onprogress: createProgressHandler(data[index]),
+  //       requestList: requestXhrList,
+  //     }),
+  //   );
 
-  // 并发请求
-  const v = await Promise.all(requestList);
+  // // 并发请求
+  // const v = await Promise.all(requestList);
+
+  // 控制并发
+  const reslut = await sendRequest(requestList, container.data);
 
   // 合并切片
   if (container.data.length === requestList.length + uploadedList.length) {
@@ -188,6 +191,60 @@ async function handleResume() {
     isPaused.value = false;
     await uploadChunks(container.data, uploadedList);
   }
+}
+
+// ⭐️网络请求并发控制
+// 思路：把异步请求放在队列里，比如并发数为4，就先同时发起3个请求，然后有请求结束了，再发起下一个请求即可
+// 并发重试 + 报错
+function sendRequest(
+  forms: {
+    formData: FormData;
+    index: number;
+  }[],
+  data: TItemData[],
+  max = 4, // 最大并发请求数，默认为4
+) {
+  return new Promise((resolve) => {
+    const len = forms.length; // 获取forms数组的长度
+    // 初始化一个索引变量，用于跟踪当前处理的FormData
+    let idx = 0;
+    // 初始化一个计数器，用于跟踪已完成的请求数量
+    let counter = 0;
+    const start = async () => {
+      // 有请求，有通道
+      // 当索引小于FormData数组的长度且最大并发数大于0时，继续执行
+      while (idx < len && max > 0) {
+        // 减少可用的并发数，表示占用一个通道
+        max--; // 占用通道
+        console.log(idx, 'start');
+        const form = forms[idx].formData;
+        const index = forms[idx].index;
+
+        idx++; // 增加索引以处理下一个表单
+
+        request({
+          url: 'http://localhost:3000/request',
+          data: form,
+          onprogress: createProgressHandler(data[index]),
+          requestList: requestXhrList,
+        }).then((res) => {
+          // 增加可用的并发数，表示释放一个通道
+          max++; // 释放通道
+          counter++;
+
+          if (counter === len) {
+            // 如果已完成的请求数量等于数组的长度，解析Promise
+            resolve(res);
+          } else {
+            // 否则继续处理下一个表单
+            start();
+          }
+        });
+      }
+    };
+    // 调用start函数，开始处理请求
+    start();
+  });
 }
 </script>
 
